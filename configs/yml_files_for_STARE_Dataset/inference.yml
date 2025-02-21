@@ -1,0 +1,27 @@
+{
+  ### Environment Parameters
+  debug: false,
+  mode: inference,
+  cuda: true,
+  pin_memory: true,
+  wandb: false,
+  worker: 2,
+  CUDA_VISIBLE_DEVICES: '1',
+
+  ### Train Parameters
+  model_name: '',
+    n_classes: 1,
+    in_channels: 3,
+    base_c: 64,
+  inference_mode: 'segmentation',
+  task: 'segmentation',
+  dataloader: 'Image2Image_zero_pad',
+  criterion: 'DiceBCE',
+  input_space: 'RGB',
+  input_channel: 3,
+  input_size: [704, 704],  # DRIVE:608, STARE:704, CHASEDB1:1024
+
+  model_path: '',
+  val_x_path: '',
+  val_y_path: '',
+}
