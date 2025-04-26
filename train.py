@@ -1,7 +1,6 @@
 import torch
 import time
 import os
-import wandb
 import numpy as np
 import sys
 import math
@@ -12,6 +11,7 @@ from models import model_implements
 from models import losses as loss_hub
 from models import metrics
 from models import utils
+from PIL import Image
 
 
 class Trainer_seg:
@@ -27,11 +27,6 @@ class Trainer_seg:
                     os.makedirs(file_path)
                 with open(os.path.join(file_path, self.args.config_path.split('/')[-1]), 'w') as f_w:
                     f_w.write(f_r.read())
-
-        if args.wandb:
-            # wandb.login(key='your_WandB_key')
-            wandb.init(project='{}'.format(args.project_name), config=args, name=now_time,
-                       settings=wandb.Settings(start_method="thread"))
 
         # Check cuda available and assign to device
         use_cuda = self.args.cuda and torch.cuda.is_available()
@@ -50,7 +45,8 @@ class Trainer_seg:
 
         self.model = self.init_model(self.args.model_name, self.device, self.args)
         self.optimizer = self.__init_optimizer(self.args.optimizer, self.model, self.args.lr)
-        self.scheduler = self.__set_scheduler(self.optimizer, self.args.scheduler, self.loader_train, self.args.batch_size)
+        self.scheduler = self.__set_scheduler(self.optimizer, self.args.scheduler, self.loader_train,
+                                              self.args.batch_size)
 
         if hasattr(self.args, 'model_path'):
             if self.args.model_path != '':
@@ -60,17 +56,14 @@ class Trainer_seg:
 
         self.criterion = self.__init_criterion(self.args.criterion)
 
-        if self.args.wandb:
-            if self.args.mode == 'train':
-                wandb.watch(self.model)
-
         self.saved_model_directory = self.args.saved_model_directory + '/' + now_time
 
         self.metric_best = {'f1_score': 0}  # the 'value' follows the metric on validation
         self.model_post_path_dict = {}
         self.last_saved_epoch = 0
 
-        self.__validate_interval = 1 if (self.loader_train.__len__() // self.args.train_fold) == 0 else self.loader_train.__len__() // self.args.train_fold
+        self.__validate_interval = 1 if (
+                                                    self.loader_train.__len__() // self.args.train_fold) == 0 else self.loader_train.__len__() // self.args.train_fold
 
         self.callback = utils.TrainerCallBack()
         if hasattr(self.model.module, 'train_callback'):
@@ -115,7 +108,8 @@ class Trainer_seg:
                 self.scheduler.step()
 
             output_argmax = torch.where(output > 0.5, 1, 0).cpu()
-            metric_result = metrics.metrics_np(output_argmax[:, 0], target.squeeze(0).detach().cpu().numpy(), b_auc=False)
+            metric_result = metrics.metrics_np(output_argmax[:, 0], target.squeeze(0).detach().cpu().numpy(),
+                                               b_auc=False)
             f1_list.append(metric_result['f1'])
             batch_losses.append(loss.item())
 
@@ -137,10 +131,6 @@ class Trainer_seg:
                                                             self.optimizer.param_groups[0]['lr']))
         f1_score = sum(f1_list) / len(f1_list)
         print('{} epoch / Train f1_score: {}'.format(epoch, f1_score))
-        if self.args.wandb:
-            wandb.log({'Train Loss {}'.format(self.args.criterion): loss_mean,
-                       'Train f1_score': f1_score},
-                      step=epoch)
 
     def _validate(self, model, epoch):
         model.eval()
@@ -148,25 +138,46 @@ class Trainer_seg:
 
         with torch.no_grad():
             for batch_idx, (x_in, target) in enumerate(self.loader_val.Loader):
-                x_in, _ = x_in
-                target, _ = target
-                x_in = x_in.to(self.device)
-                target = target.long().to(self.device)
+                x_in, x_path = x_in
+                target, target_path = target
 
-                output = model(x_in)
+                # Patch-based tahmin kullanılacaksa
+                if hasattr(self.args, 'use_patches') and self.args.use_patches and hasattr(self.args,
+                                                                                           'patch_predict') and self.args.patch_predict:
+                    # Orijinal görüntüyü yükle
+                    original_image = Image.open(x_path[0]).convert('RGB')
+                    original_target = Image.open(target_path[0]).convert('L')
 
-                if isinstance(output, tuple) or isinstance(output, list):  # condition for Deep supervision
-                    output = output[0]
+                    # Patch-based tahmin yap
+                    prediction = self._predict_with_patches(model, original_image)
 
-                output_argmax = torch.where(output > 0.5, 1, 0).cpu()
-                metric_result = metrics.metrics_np(output_argmax[:, 0], target.squeeze(0).detach().cpu().numpy(), b_auc=False)
+                    # Hedef görüntüyü numpy dizisine çevir
+                    target_np = np.array(original_target)
+                    target_np = np.where(target_np < 128, 0, 1)  # Binary dönüşüm
+
+                    # Binary tahmin (0.5 threshold)
+                    output_binary = (prediction > 0.5).astype(np.uint8)
+
+                    # Metrikler
+                    metric_result = metrics.metrics_np(output_binary, target_np, b_auc=False)
+                else:
+                    # Normal validasyon kodu
+                    x_in = x_in.to(self.device)
+                    target = target.long().to(self.device)
+
+                    output = model(x_in)
+
+                    if isinstance(output, tuple) or isinstance(output, list):  # condition for Deep supervision
+                        output = output[0]
+
+                    output_argmax = torch.where(output > 0.5, 1, 0).cpu()
+                    metric_result = metrics.metrics_np(output_argmax[:, 0], target.squeeze(0).detach().cpu().numpy(),
+                                                       b_auc=False)
+
                 f1_list.append(metric_result['f1'])
 
         f1_score = sum(f1_list) / len(f1_list)
         print('{} epoch / Val f1_score: {}'.format(epoch, f1_score))
-        if self.args.wandb:
-            wandb.log({'Val f1_score': f1_score},
-                      step=epoch)
 
         model_metrics = {'f1_score': f1_score}
 
@@ -178,9 +189,62 @@ class Trainer_seg:
         if (epoch - self.last_saved_epoch) > self.args.cycles * 4:
             print('The model seems to be converged. Early stop training.')
             print(f'Best F1 -----> {self.metric_best["f1_score"]}')
-            wandb.log({f'Best F1': self.metric_best['f1_score']},
-                      step=epoch)
             sys.exit()  # safe exit
+
+    def _predict_with_patches(self, model, image):
+        """
+        Görüntüyü patch'lere bölerek tahmin yapar ve sonuçları birleştirir
+        """
+        from torchvision import transforms
+
+        # Görüntü boyutlarını al
+        w, h = image.size
+        patch_size = self.args.patch_size
+        stride = self.args.patch_stride if hasattr(self.args, 'patch_stride') else patch_size // 2
+
+        # Sonuç görüntüsü ve sayacı
+        result = np.zeros((h, w), dtype=np.float32)
+        count = np.zeros((h, w), dtype=np.float32)
+
+        # Normalize etmek için transform
+        normalize = transforms.Normalize(mean=self.loader_val.image_loader.image_mean,
+                                         std=self.loader_val.image_loader.image_std)
+
+        # Patch'leri işle
+        for i in range(0, h - patch_size + 1, stride):
+            for j in range(0, w - patch_size + 1, stride):
+                # Patch'i kırp
+                patch = image.crop((j, i, j + patch_size, i + patch_size))
+
+                # Tensor'a dönüştür ve normalize et
+                patch_tensor = transforms.ToTensor()(patch)
+
+                if self.args.input_space == 'RGB':
+                    patch_tensor = normalize(patch_tensor)
+                elif self.args.input_space == 'GR':
+                    patch_tensor_r = patch_tensor[0].unsqueeze(0)
+                    patch_tensor_grey = transforms.ToTensor()(transforms.Grayscale()(patch))
+                    patch_tensor = torch.cat((patch_tensor_r, patch_tensor_grey), dim=0)
+
+                patch_tensor = patch_tensor.unsqueeze(0).to(self.device)
+
+                # Model tahmini
+                output = model(patch_tensor)
+                if isinstance(output, tuple) or isinstance(output, list):
+                    output = output[0]
+
+                # Sigmoid uygula ve numpy'a dönüştür
+                prediction = torch.sigmoid(output).squeeze().cpu().numpy()
+
+                # Sonuç görüntüsüne ekle
+                result[i:i + patch_size, j:j + patch_size] += prediction
+                count[i:i + patch_size, j:j + patch_size] += 1
+
+        # Ortalama al (0'a bölme hatasını önlemek için)
+        mask = count > 0
+        result[mask] = result[mask] / count[mask]
+
+        return result
 
     def start_train(self):
         for epoch in range(1, self.args.epoch + 1):
@@ -258,11 +322,13 @@ class Trainer_seg:
                                                               cycles=self.args.epoch / self.args.cycles,
                                                               last_epoch=-1)
             elif scheduler_name == 'CosineAnnealingLR':
-                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.args.cycles, eta_min=self.args.lr / 100)   # min: lr / 100, max: lr
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.args.cycles,
+                                                                       eta_min=self.args.lr / 100)  # min: lr / 100, max: lr
             elif scheduler_name == 'ConstantLRSchedule':
                 scheduler = lr_scheduler.ConstantLRSchedule(optimizer, last_epoch=-1)
             elif scheduler_name == 'WarmupConstantSchedule':
-                scheduler = lr_scheduler.WarmupConstantSchedule(optimizer, warmup_steps=steps_per_epoch * self.args.warmup_epoch)
+                scheduler = lr_scheduler.WarmupConstantSchedule(optimizer,
+                                                                warmup_steps=steps_per_epoch * self.args.warmup_epoch)
             else:
                 raise Exception('No scheduler named', scheduler_name)
         else:

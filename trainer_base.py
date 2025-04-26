@@ -1,7 +1,6 @@
 import abc
 import torch
 import os
-import wandb
 import math
 
 from models import dataloader as dataloader_hub
@@ -51,11 +50,6 @@ class TrainerBase:
                     self.model.module.load_pretrained(self.args.model_path)
                     print('Model loaded successfully!!! (Custom)')
                 self.model.to(self.device)
-
-        if self.args.wandb:
-            wandb.init(project='{}'.format(args.project_name), config=args, name=now_time,
-                       settings=wandb.Settings(start_method="fork"))
-            wandb.watch(self.model)
 
         self.model_post_path_dict = {}
         self.last_saved_epoch = 0

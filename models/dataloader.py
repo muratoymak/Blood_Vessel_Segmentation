@@ -14,7 +14,7 @@ from models import utils
 
 # fix randomness on DataLoader
 def seed_worker(worker_id):
-    worker_seed = torch.initial_seed() % 2**32
+    worker_seed = torch.initial_seed() % 2 ** 32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
@@ -87,7 +87,8 @@ class Image2ImageLoader_zero_pad(Dataset):
 
         assert len(self.img_x_path) == len(self.img_y_path), 'Images in directory must have same file indices!!'
 
-        print(f'{utils.Colors.LIGHT_RED}Mounting data on memory...{self.__class__.__name__}:{self.mode}{utils.Colors.END}')
+        print(
+            f'{utils.Colors.LIGHT_RED}Mounting data on memory...{self.__class__.__name__}:{self.mode}{utils.Colors.END}')
         self.img_x = []
         self.img_y = []
         for index in range(len(self.img_x_path)):
@@ -98,14 +99,39 @@ class Image2ImageLoader_zero_pad(Dataset):
 
     def transform(self, image, target):
         if self.mode == 'validation':
-            image = utils.center_padding(image, [int(self.args.input_size[0]), int(self.args.input_size[1])])
-            target = utils.center_padding(target, [int(self.args.input_size[0]), int(self.args.input_size[1])])
+            if hasattr(self.args, 'use_patches') and self.args.use_patches and hasattr(self.args,
+                                                                                       'val_full_image') and not self.args.val_full_image:
+                # Validasyon sırasında da patch kullanılacaksa
+                w, h = image.size
+                patch_size = self.args.patch_size
+
+                # Görüntünün ortasından bir patch al
+                if w > patch_size and h > patch_size:
+                    i = (h - patch_size) // 2
+                    j = (w - patch_size) // 2
+                    image = tf.crop(image, i, j, patch_size, patch_size)
+                    target = tf.crop(target, i, j, patch_size, patch_size)
+            else:
+                # Tam görüntü için padding
+                image = utils.center_padding(image, [int(self.args.input_size[0]), int(self.args.input_size[1])])
+                target = utils.center_padding(target, [int(self.args.input_size[0]), int(self.args.input_size[1])])
 
         if not self.mode == 'validation':
             random_gen = random.Random()  # thread-safe random
 
+            # PATCH-BASED YAKLAŞIM
+            if hasattr(self.args, 'use_patches') and self.args.use_patches:
+                w, h = image.size
+                patch_size = self.args.patch_size
+
+                if w > patch_size and h > patch_size:
+                    i = random_gen.randint(0, h - patch_size)
+                    j = random_gen.randint(0, w - patch_size)
+                    image = tf.crop(image, i, j, patch_size, patch_size)
+                    target = tf.crop(target, i, j, patch_size, patch_size)
+
             if (random_gen.random() < 0.8) and self.args.transform_cutmix:
-                rand_n = random_gen.randint(0, self.__len__() - 1)     # randomly generates reference image on dataset
+                rand_n = random_gen.randint(0, self.__len__() - 1)  # randomly generates reference image on dataset
                 image_refer = Image.open(self.img_x_path[rand_n]).convert('RGB')
                 target_refer = Image.open(self.img_y_path[rand_n]).convert('L')
                 image, target = utils.cut_mix(image, target, image_refer, target_refer)
@@ -120,7 +146,8 @@ class Image2ImageLoader_zero_pad(Dataset):
                 target = tf.resize(target, [resize_h, resize_w], interpolation=InterpolationMode.NEAREST)
 
             if hasattr(self.args, 'transform_rand_crop'):
-                i, j, h, w = transforms.RandomCrop.get_params(image, output_size=(int(self.args.transform_rand_crop), int(self.args.transform_rand_crop)))
+                i, j, h, w = transforms.RandomCrop.get_params(image, output_size=(
+                int(self.args.transform_rand_crop), int(self.args.transform_rand_crop)))
                 image = tf.crop(image, i, j, h, w)
                 target = tf.crop(target, i, j, h, w)
 
@@ -133,7 +160,7 @@ class Image2ImageLoader_zero_pad(Dataset):
                 image = transform(image)
 
             if (random_gen.random() < 0.5) and self.args.transform_blur:
-                kernel_size = int((random.random() * 10 + 2.5).__round__())    # random kernel size 3 to 11
+                kernel_size = int((random.random() * 10 + 2.5).__round__())  # random kernel size 3 to 11
                 if kernel_size % 2 == 0:
                     kernel_size -= 1
                 transform = transforms.GaussianBlur(kernel_size=kernel_size)
@@ -141,14 +168,15 @@ class Image2ImageLoader_zero_pad(Dataset):
 
             # recommend to use at the end.
             if (random_gen.random() < 0.3) and self.args.transform_perspective:
-                start_p, end_p = transforms.RandomPerspective.get_params(image.width, image.height, distortion_scale=0.5)
+                start_p, end_p = transforms.RandomPerspective.get_params(image.width, image.height,
+                                                                         distortion_scale=0.5)
                 image = tf.perspective(image, start_p, end_p)
                 target = tf.perspective(target, start_p, end_p, interpolation=InterpolationMode.NEAREST)
 
         image_tensor = tf.to_tensor(image)
         target_tensor = torch.tensor(np.array(target))
 
-        if self.args.input_space == 'GR':   # grey, red
+        if self.args.input_space == 'GR':  # grey, red
             image_tensor_r = image_tensor[0].unsqueeze(0)
             image_tensor_grey = tf.to_tensor(tf.to_grayscale(image))
 
@@ -163,7 +191,7 @@ class Image2ImageLoader_zero_pad(Dataset):
         if self.args.n_classes <= 2:  # for visualized binary GT
             target_tensor[target_tensor < 128] = 0
             target_tensor[target_tensor >= 128] = 1
-        target_tensor = target_tensor.unsqueeze(0)    # expand 'grey channel' for loss function dependency
+        target_tensor = target_tensor.unsqueeze(0)  # expand 'grey channel' for loss function dependency
 
         return image_tensor, target_tensor
 
@@ -186,7 +214,6 @@ class Image2ImageDataLoader_zero_pad:
                  num_workers=0,
                  pin_memory=True,
                  **kwargs):
-
         g = torch.Generator()
         g.manual_seed(3407)
 
